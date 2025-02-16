@@ -133,7 +133,7 @@
         let lastFrameTime = 0;
 
         // Get microphone access
-        navigator.mediaDevices.getUserMedia({ audio: true })
+        navigator.mediaDevices.getUserMedia({ audio: true, noiseSuppression: true, echoCancellation: true, autoGainControl: true })
             .then(function (ms) {
                 stream = ms;
 
