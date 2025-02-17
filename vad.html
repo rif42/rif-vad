@@ -120,6 +120,9 @@
             holdTimeMs: 500,         // How long to hold "active" state after voice detected
             minVoiceMs: 150,           // Minimum time voice must be detected to trigger
             hysteresisFactor: 0.3,    // Additional threshold reduction once voice is active
+
+            preRollBufferMs: 1000,      // Keep 1 second of pre-roll audio
+            timesliceMs: 100            // 100ms recording chunks
         };
 
         // Buffer for adaptive thresholding
@@ -133,6 +136,10 @@
         let isVoiceHeld = false;
         let consecutiveVoiceTime = 0;
         let lastFrameTime = 0;
+
+        // Add buffer variables with other state trackers
+        let audioBuffer = [];
+        let bufferSize;
 
         const toggleBtn = document.getElementById('toggleBtn');
         let audioContext = null;
@@ -153,13 +160,18 @@
                     let wasVoiceActive = false;
 
                     audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    bufferSize = Math.floor((CONFIG.preRollBufferMs / 1000) * audioContext.sampleRate);
+                    audioBuffer = [];
+
                     const source = audioContext.createMediaStreamSource(stream);
                     const analyzer = audioContext.createAnalyser();
                     analyzer.fftSize = CONFIG.fftSize;
                     analyzer.smoothingTimeConstant = CONFIG.smoothingTimeConstant;
                     source.connect(analyzer);
 
-                    voiceRecorder = new MediaRecorder(stream);
+                    const audioStreamDest = audioContext.createMediaStreamDestination();
+                    source.connect(audioStreamDest);
+                    voiceRecorder = new MediaRecorder(audioStreamDest.stream);
 
                     function calculateZCR(timeData) {
                         let crossings = 0;
@@ -292,24 +304,41 @@
                         const isVoiceActive = isVoiceHeld ||
                             (instantVoiceActive && consecutiveVoiceTime >= CONFIG.minVoiceMs);
 
+                        // Store raw audio data in buffer (before voice detection)
+                        const rawAudioCopy = new Float32Array(timeData.length);
+                        rawAudioCopy.set(timeData);
+                        audioBuffer.push(rawAudioCopy);
+                        
+                        // Keep only needed history
+                        while (audioBuffer.length > bufferSize) {
+                            audioBuffer.shift();
+                        }
+
                         // Voice-controlled recording logic
                         if (isVoiceActive && !wasVoiceActive) {
-                            // Start new recording session
                             voiceChunks = [];
-                            voiceRecorder.ondataavailable = e => voiceChunks.push(e.data);
-                            voiceRecorder.onstop = () => {
-                                const audioBlob = new Blob(voiceChunks, { type: 'audio/webm' });
+                            
+                            voiceRecorder.ondataavailable = e => {
+                                voiceChunks.push(e.data);
+                                
+                                // New: Create and play audio when we get data
+                                const audioBlob = new Blob([e.data], { type: 'audio/webm' });
                                 const audioUrl = URL.createObjectURL(audioBlob);
-                                const audio = new Audio(audioUrl);
-                                audio.play();
-                                audio.onended = () => URL.revokeObjectURL(audioUrl);
+                                const audioElement = new Audio(audioUrl);
+                                audioElement.play().catch(err => console.log('Playback failed:', err));
                             };
-                            voiceRecorder.start();
+                            
+                            voiceRecorder.start(CONFIG.timesliceMs);
                         } else if (!isVoiceActive && wasVoiceActive) {
-                            // Stop current recording session
-                            if (voiceRecorder && voiceRecorder.state === 'recording') {
-                                voiceRecorder.stop();
-                            }
+                            voiceRecorder.stop();
+                            
+                            // New: Final playback of full recording
+                            voiceRecorder.onstop = () => {
+                                const fullBlob = new Blob(voiceChunks, { type: 'audio/webm' });
+                                const audioUrl = URL.createObjectURL(fullBlob);
+                                const audioElement = new Audio(audioUrl);
+                                audioElement.play().catch(err => console.log('Full playback failed:', err));
+                            };
                         }
 
                         wasVoiceActive = isVoiceActive;
