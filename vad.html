@@ -96,30 +96,30 @@
         // Configuration parameters
         const CONFIG = {
             // How many previous frames to consider for adaptation
-            frameMemory: 200,
+            frameMemory: 150,
 
             // FFT size affects frequency resolution
             fftSize: 256,
 
             // Thresholding factors
-            energyThresholdFactor: 1.25,    // Higher = less sensitive to energy
-            zcrThresholdFactor: 2,       // Higher = more tolerant of high ZCR
-            centroidThresholdFactor: 0.5,   // Higher = requires higher frequency content
+            energyThresholdFactor: 0.8,    // Higher = less sensitive to energy
+            zcrThresholdFactor: 1.5,       // Higher = more tolerant of high ZCR
+            centroidThresholdFactor: 0.6,   // Higher = requires higher frequency content
 
             // Noise floor settings
-            noiseFloorPercentile: 20,    // Percentile to use for noise floor (10th percentile)
-            noiseFloorOffset: 15,        // dB above noise floor to consider as minimum
+            noiseFloorPercentile: 10,    // Percentile to use for noise floor (10th percentile)
+            noiseFloorOffset: 10,        // dB above noise floor to consider as minimum
 
             // Minimum values to consider as speech
-            minCentroid: 800,              // Minimum spectral centroid
+            minCentroid: 1000,              // Minimum spectral centroid
 
             // Smoothing
-            smoothingTimeConstant: 0.8,      // 0-1, higher = more smoothing
+            smoothingTimeConstant: 0.7,      // 0-1, higher = more smoothing
 
             // Voice detection stability settings
-            holdTimeMs: 100,         // How long to hold "active" state after voice detected
-            minVoiceMs: 200,           // Minimum time voice must be detected to trigger
-            hysteresisFactor: 0.4,    // Additional threshold reduction once voice is active
+            holdTimeMs: 500,         // How long to hold "active" state after voice detected
+            minVoiceMs: 150,           // Minimum time voice must be detected to trigger
+            hysteresisFactor: 0.3,    // Additional threshold reduction once voice is active
         };
 
         // Buffer for adaptive thresholding
@@ -158,6 +158,8 @@
                     analyzer.fftSize = CONFIG.fftSize;
                     analyzer.smoothingTimeConstant = CONFIG.smoothingTimeConstant;
                     source.connect(analyzer);
+
+                    voiceRecorder = new MediaRecorder(stream);
 
                     function calculateZCR(timeData) {
                         let crossings = 0;
@@ -293,7 +295,6 @@
                         // Voice-controlled recording logic
                         if (isVoiceActive && !wasVoiceActive) {
                             // Start new recording session
-                            voiceRecorder = new MediaRecorder(stream);
                             voiceChunks = [];
                             voiceRecorder.ondataavailable = e => voiceChunks.push(e.data);
                             voiceRecorder.onstop = () => {
