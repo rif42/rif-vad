@@ -67,6 +67,9 @@
 
 <body>
     <h1>Voice Decibel Meter</h1>
+    <div class="controls">
+        <button id="toggleBtn">Start Recording</button>
+    </div>
     <div id="decibelDisplay">0 dB</div>
 
     <div id="features">
@@ -85,7 +88,6 @@
     </div>
 
     <script>
-        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
         let mediaRecorder;
         let stream;
         let isRecording = false;
@@ -97,15 +99,15 @@
             frameMemory: 200,
 
             // FFT size affects frequency resolution
-            fftSize: 1024,
+            fftSize: 256,
 
             // Thresholding factors
-            energyThresholdFactor: 1.5,    // Higher = less sensitive to energy
-            zcrThresholdFactor: 3,       // Higher = more tolerant of high ZCR
+            energyThresholdFactor: 1.25,    // Higher = less sensitive to energy
+            zcrThresholdFactor: 2,       // Higher = more tolerant of high ZCR
             centroidThresholdFactor: 0.5,   // Higher = requires higher frequency content
 
             // Noise floor settings
-            noiseFloorPercentile: 25,    // Percentile to use for noise floor (10th percentile)
+            noiseFloorPercentile: 20,    // Percentile to use for noise floor (10th percentile)
             noiseFloorOffset: 15,        // dB above noise floor to consider as minimum
 
             // Minimum values to consider as speech
@@ -115,9 +117,9 @@
             smoothingTimeConstant: 0.8,      // 0-1, higher = more smoothing
 
             // Voice detection stability settings
-            holdTimeMs: 500,         // How long to hold "active" state after voice detected
+            holdTimeMs: 100,         // How long to hold "active" state after voice detected
             minVoiceMs: 200,           // Minimum time voice must be detected to trigger
-            hysteresisFactor: 0.3,    // Additional threshold reduction once voice is active
+            hysteresisFactor: 0.4,    // Additional threshold reduction once voice is active
         };
 
         // Buffer for adaptive thresholding
@@ -132,172 +134,220 @@
         let consecutiveVoiceTime = 0;
         let lastFrameTime = 0;
 
-        // Get microphone access
-        navigator.mediaDevices.getUserMedia({ audio: true, noiseSuppression: true, echoCancellation: true, autoGainControl: true })
-            .then(function (ms) {
-                stream = ms;
+        const toggleBtn = document.getElementById('toggleBtn');
+        let audioContext = null;
 
-                const source = audioContext.createMediaStreamSource(ms);
-                const analyzer = audioContext.createAnalyser();
-                analyzer.fftSize = CONFIG.fftSize;
-                analyzer.smoothingTimeConstant = CONFIG.smoothingTimeConstant;
+        toggleBtn.addEventListener('click', async () => {
+            if (!isRecording) {
+                try {
+                    stream = await navigator.mediaDevices.getUserMedia({
+                        audio: true,
+                        noiseSuppression: true,
+                        echoCancellation: true,
+                        autoGainControl: true
+                    });
 
-                // Connect the source to the analyzer
-                source.connect(analyzer);
+                    // Voice recording variables
+                    let voiceRecorder = null;
+                    let voiceChunks = [];
+                    let wasVoiceActive = false;
 
-                function calculateZCR(timeData) {
-                    let crossings = 0;
-                    for (let i = 1; i < timeData.length; i++) {
-                        if ((timeData[i] >= 0 && timeData[i - 1] < 0) ||
-                            (timeData[i] < 0 && timeData[i - 1] >= 0)) {
-                            crossings++;
-                        }
-                    }
-                    return crossings / timeData.length;
-                }
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    const source = audioContext.createMediaStreamSource(stream);
+                    const analyzer = audioContext.createAnalyser();
+                    analyzer.fftSize = CONFIG.fftSize;
+                    analyzer.smoothingTimeConstant = CONFIG.smoothingTimeConstant;
+                    source.connect(analyzer);
 
-                function calculateSpectralCentroid(frequencyData, sampleRate) {
-                    let numerator = 0;
-                    let denominator = 0;
-
-                    for (let i = 0; i < frequencyData.length; i++) {
-                        const frequency = (i * sampleRate) / (frequencyData.length * 2);
-                        numerator += frequency * frequencyData[i];
-                        denominator += frequencyData[i];
-                    }
-
-                    return denominator === 0 ? 0 : numerator / denominator;
-                }
-
-                function calculateNoiseFloor(energyHistory) {
-                    // Sort a copy of the energy history
-                    const sortedEnergies = [...energyHistory].sort((a, b) => a - b);
-
-                    // Calculate the index for the percentile
-                    const index = Math.floor((CONFIG.noiseFloorPercentile / 100) * sortedEnergies.length);
-
-                    // Get the noise floor and add the offset
-                    return sortedEnergies[index] + CONFIG.noiseFloorOffset;
-                }
-
-                function updateAdaptiveThresholds() {
-                    const energyMean = energyHistory.reduce((a, b) => a + b) / CONFIG.frameMemory;
-                    const energyStd = Math.sqrt(
-                        energyHistory.reduce((a, b) => a + Math.pow(b - energyMean, 2), 0) / CONFIG.frameMemory
-                    );
-
-                    const zcrMean = zcrHistory.reduce((a, b) => a + b) / CONFIG.frameMemory;
-                    const centroidMean = centroidHistory.reduce((a, b) => a + b) / CONFIG.frameMemory;
-
-                    // Calculate adaptive noise floor
-                    const noiseFloor = calculateNoiseFloor(energyHistory);
-
-                    return {
-                        energyThreshold: Math.max(
-                            energyMean - (energyStd * CONFIG.energyThresholdFactor),
-                            noiseFloor  // Use noise floor instead of fixed minEnergy
-                        ),
-                        zcrThreshold: zcrMean * CONFIG.zcrThresholdFactor,
-                        centroidThreshold: Math.max(
-                            centroidMean * CONFIG.centroidThresholdFactor,
-                            CONFIG.minCentroid
-                        ),
-                        noiseFloor: noiseFloor  // Include noise floor in return values
-                    };
-                }
-
-                function updateDecibels() {
-                    const currentTime = Date.now();
-                    const deltaTime = lastFrameTime ? currentTime - lastFrameTime : 0;
-                    lastFrameTime = currentTime;
-
-                    const bufferLength = analyzer.frequencyBinCount;
-                    const timeData = new Float32Array(bufferLength);
-                    const frequencyData = new Uint8Array(bufferLength);
-
-                    analyzer.getFloatTimeDomainData(timeData);
-                    analyzer.getByteFrequencyData(frequencyData);
-
-                    // Calculate RMS and convert to decibels
-                    const rms = Math.sqrt(
-                        timeData.reduce((sum, value) => sum + (value * value), 0) / bufferLength
-                    );
-                    const decibels = 20 * Math.log10(rms || 0.0000001);
-
-                    // Calculate ZCR
-                    const zcr = calculateZCR(timeData);
-
-                    // Calculate Spectral Centroid
-                    const centroid = calculateSpectralCentroid(frequencyData, audioContext.sampleRate);
-
-                    // Update histories
-                    energyHistory = [...energyHistory.slice(1), decibels];
-                    zcrHistory = [...zcrHistory.slice(1), zcr];
-                    centroidHistory = [...centroidHistory.slice(1), centroid];
-
-                    // Get adaptive thresholds
-                    const thresholds = updateAdaptiveThresholds();
-
-                    // Apply hysteresis when voice is held
-                    const activeEnergyThreshold = isVoiceHeld ?
-                        thresholds.energyThreshold - (CONFIG.hysteresisFactor * Math.abs(thresholds.energyThreshold)) :
-                        thresholds.energyThreshold;
-
-                    // Basic voice detection
-                    const instantVoiceActive =
-                        decibels > activeEnergyThreshold &&
-                        (zcr < thresholds.zcrThreshold || centroid > thresholds.centroidThreshold) &&
-                        decibels > thresholds.noiseFloor;  // Use noise floor instead of CONFIG.minEnergy
-
-                    // Update consecutive voice time
-                    if (instantVoiceActive) {
-                        consecutiveVoiceTime += deltaTime;
-                        lastVoiceDetectedTime = currentTime;
-
-                        // If we exceed minimum voice time, start/extend hold timer
-                        if (consecutiveVoiceTime >= CONFIG.minVoiceMs) {
-                            if (voiceHoldTimer) {
-                                clearTimeout(voiceHoldTimer);
+                    function calculateZCR(timeData) {
+                        let crossings = 0;
+                        for (let i = 1; i < timeData.length; i++) {
+                            if ((timeData[i] >= 0 && timeData[i - 1] < 0) ||
+                                (timeData[i] < 0 && timeData[i - 1] >= 0)) {
+                                crossings++;
                             }
-                            voiceHoldTimer = setTimeout(() => {
-                                isVoiceHeld = false;
-                                consecutiveVoiceTime = 0;
-                            }, CONFIG.holdTimeMs);
-                            isVoiceHeld = true;
                         }
-                    } else {
-                        // Only reset consecutive time if we're not in hold period
-                        if (currentTime - lastVoiceDetectedTime > CONFIG.holdTimeMs) {
-                            consecutiveVoiceTime = 0;
-                        }
+                        return crossings / timeData.length;
                     }
 
-                    // Final voice active state combines instant detection and hold state
-                    const isVoiceActive = isVoiceHeld ||
-                        (instantVoiceActive && consecutiveVoiceTime >= CONFIG.minVoiceMs);
+                    function calculateSpectralCentroid(frequencyData, sampleRate) {
+                        let numerator = 0;
+                        let denominator = 0;
 
-                    // Update displays
-                    const displayValue = Math.round(decibels * 10) / 10;
-                    const decibelDisplay = document.getElementById('decibelDisplay');
-                    decibelDisplay.textContent = `${displayValue} dB`;
-                    decibelDisplay.style.backgroundColor = isVoiceActive ? 'green' : 'white';
-                    decibelDisplay.style.color = isVoiceActive ? 'white' : 'black';
+                        for (let i = 0; i < frequencyData.length; i++) {
+                            const frequency = (i * sampleRate) / (frequencyData.length * 2);
+                            numerator += frequency * frequencyData[i];
+                            denominator += frequencyData[i];
+                        }
 
-                    // Update feature displays
-                    document.getElementById('energyValue').textContent =
-                        `${displayValue} dB (NF: ${Math.round(thresholds.noiseFloor)})`; // Show noise floor
-                    document.getElementById('zcrValue').textContent = zcr.toFixed(3);
-                    document.getElementById('centroidValue').textContent = Math.round(centroid);
+                        return denominator === 0 ? 0 : numerator / denominator;
+                    }
 
-                    animationId = requestAnimationFrame(updateDecibels);
+                    function calculateNoiseFloor(energyHistory) {
+                        // Sort a copy of the energy history
+                        const sortedEnergies = [...energyHistory].sort((a, b) => a - b);
+
+                        // Calculate the index for the percentile
+                        const index = Math.floor((CONFIG.noiseFloorPercentile / 100) * sortedEnergies.length);
+
+                        // Get the noise floor and add the offset
+                        return sortedEnergies[index] + CONFIG.noiseFloorOffset;
+                    }
+
+                    function updateAdaptiveThresholds() {
+                        const energyMean = energyHistory.reduce((a, b) => a + b) / CONFIG.frameMemory;
+                        const energyStd = Math.sqrt(
+                            energyHistory.reduce((a, b) => a + Math.pow(b - energyMean, 2), 0) / CONFIG.frameMemory
+                        );
+
+                        const zcrMean = zcrHistory.reduce((a, b) => a + b) / CONFIG.frameMemory;
+                        const centroidMean = centroidHistory.reduce((a, b) => a + b) / CONFIG.frameMemory;
+
+                        // Calculate adaptive noise floor
+                        const noiseFloor = calculateNoiseFloor(energyHistory);
+
+                        return {
+                            energyThreshold: Math.max(
+                                energyMean - (energyStd * CONFIG.energyThresholdFactor),
+                                noiseFloor  // Use noise floor instead of fixed minEnergy
+                            ),
+                            zcrThreshold: zcrMean * CONFIG.zcrThresholdFactor,
+                            centroidThreshold: Math.max(
+                                centroidMean * CONFIG.centroidThresholdFactor,
+                                CONFIG.minCentroid
+                            ),
+                            noiseFloor: noiseFloor  // Include noise floor in return values
+                        };
+                    }
+
+                    function updateDecibels() {
+                        const currentTime = Date.now();
+                        const deltaTime = lastFrameTime ? currentTime - lastFrameTime : 0;
+                        lastFrameTime = currentTime;
+
+                        const bufferLength = analyzer.frequencyBinCount;
+                        const timeData = new Float32Array(bufferLength);
+                        const frequencyData = new Uint8Array(bufferLength);
+
+                        analyzer.getFloatTimeDomainData(timeData);
+                        analyzer.getByteFrequencyData(frequencyData);
+
+                        // Calculate RMS and convert to decibels
+                        const rms = Math.sqrt(
+                            timeData.reduce((sum, value) => sum + (value * value), 0) / bufferLength
+                        );
+                        const decibels = 20 * Math.log10(rms || 0.0000001);
+
+                        // Calculate ZCR
+                        const zcr = calculateZCR(timeData);
+
+                        // Calculate Spectral Centroid
+                        const centroid = calculateSpectralCentroid(frequencyData, audioContext.sampleRate);
+
+                        // Update histories
+                        energyHistory = [...energyHistory.slice(1), decibels];
+                        zcrHistory = [...zcrHistory.slice(1), zcr];
+                        centroidHistory = [...centroidHistory.slice(1), centroid];
+
+                        // Get adaptive thresholds
+                        const thresholds = updateAdaptiveThresholds();
+
+                        // Apply hysteresis when voice is held
+                        const activeEnergyThreshold = isVoiceHeld ?
+                            thresholds.energyThreshold - (CONFIG.hysteresisFactor * Math.abs(thresholds.energyThreshold)) :
+                            thresholds.energyThreshold;
+
+                        // Basic voice detection
+                        const instantVoiceActive =
+                            decibels > activeEnergyThreshold &&
+                            (zcr < thresholds.zcrThreshold || centroid > thresholds.centroidThreshold) &&
+                            decibels > thresholds.noiseFloor;  // Use noise floor instead of CONFIG.minEnergy
+
+                        // Update consecutive voice time
+                        if (instantVoiceActive) {
+                            consecutiveVoiceTime += deltaTime;
+                            lastVoiceDetectedTime = currentTime;
+
+                            // If we exceed minimum voice time, start/extend hold timer
+                            if (consecutiveVoiceTime >= CONFIG.minVoiceMs) {
+                                if (voiceHoldTimer) {
+                                    clearTimeout(voiceHoldTimer);
+                                }
+                                voiceHoldTimer = setTimeout(() => {
+                                    isVoiceHeld = false;
+                                    consecutiveVoiceTime = 0;
+                                }, CONFIG.holdTimeMs);
+                                isVoiceHeld = true;
+                            }
+                        } else {
+                            // Only reset consecutive time if we're not in hold period
+                            if (currentTime - lastVoiceDetectedTime > CONFIG.holdTimeMs) {
+                                consecutiveVoiceTime = 0;
+                            }
+                        }
+
+                        // Final voice active state combines instant detection and hold state
+                        const isVoiceActive = isVoiceHeld ||
+                            (instantVoiceActive && consecutiveVoiceTime >= CONFIG.minVoiceMs);
+
+                        // Voice-controlled recording logic
+                        if (isVoiceActive && !wasVoiceActive) {
+                            // Start new recording session
+                            voiceRecorder = new MediaRecorder(stream);
+                            voiceChunks = [];
+                            voiceRecorder.ondataavailable = e => voiceChunks.push(e.data);
+                            voiceRecorder.onstop = () => {
+                                const audioBlob = new Blob(voiceChunks, { type: 'audio/webm' });
+                                const audioUrl = URL.createObjectURL(audioBlob);
+                                const audio = new Audio(audioUrl);
+                                audio.play();
+                                audio.onended = () => URL.revokeObjectURL(audioUrl);
+                            };
+                            voiceRecorder.start();
+                        } else if (!isVoiceActive && wasVoiceActive) {
+                            // Stop current recording session
+                            if (voiceRecorder && voiceRecorder.state === 'recording') {
+                                voiceRecorder.stop();
+                            }
+                        }
+
+                        wasVoiceActive = isVoiceActive;
+
+                        // Update displays
+                        const displayValue = Math.round(decibels * 10) / 10;
+                        const decibelDisplay = document.getElementById('decibelDisplay');
+                        decibelDisplay.textContent = `${displayValue} dB`;
+                        decibelDisplay.style.backgroundColor = isVoiceActive ? 'green' : 'white';
+                        decibelDisplay.style.color = isVoiceActive ? 'white' : 'black';
+
+                        // Update feature displays
+                        document.getElementById('energyValue').textContent =
+                            `${displayValue} dB (NF: ${Math.round(thresholds.noiseFloor)})`; // Show noise floor
+                        document.getElementById('zcrValue').textContent = zcr.toFixed(3);
+                        document.getElementById('centroidValue').textContent = Math.round(centroid);
+
+                        animationId = requestAnimationFrame(updateDecibels);
+                    }
+
+                    updateDecibels();
+                    toggleBtn.textContent = 'Stop Recording';
+                    isRecording = true;
+                } catch (err) {
+                    console.error('Error accessing microphone:', err);
                 }
-
-                updateDecibels();
-            })
-            .catch(function (err) {
-                console.error('Error accessing microphone:', err);
-            });
-
+            } else {
+                // Cleanup resources
+                if (stream) {
+                    stream.getTracks().forEach(track => track.stop());
+                }
+                if (audioContext) {
+                    audioContext.close();
+                }
+                cancelAnimationFrame(animationId);
+                toggleBtn.textContent = 'Start Recording';
+                isRecording = false;
+            }
+        });
 
         // Stop recording button
 
