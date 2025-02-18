@@ -87,6 +87,21 @@
         </div>
     </div>
 
+    <div id="features">
+        <div class="feature">
+            <div>Noise Floor Threshold</div>
+            <div id="noiseFloorThresholdValue" class="feature-value">0</div>
+        </div>
+        <div class="feature">
+            <div>ZCR Threshold</div>
+            <div id="zcrThresholdValue" class="feature-value">0</div>
+        </div>
+        <div class="feature">
+            <div>Spectral Centroid Threshold</div>
+            <div id="centroidThresholdValue" class="feature-value">0</div>
+        </div>
+    </div>
+
     <script>
         let mediaRecorder;
         let stream;
@@ -96,30 +111,35 @@
         // Configuration parameters
         const CONFIG = {
             // How many previous frames to consider for adaptation
-            frameMemory: 150,
+            frameMemory: 200,
 
             // FFT size affects frequency resolution
             fftSize: 256,
 
             // Thresholding factors
-            energyThresholdFactor: 0.8,    // Higher = less sensitive to energy
-            zcrThresholdFactor: 1.5,       // Higher = more tolerant of high ZCR
-            centroidThresholdFactor: 0.6,   // Higher = requires higher frequency content
+            energyThresholdFactor: 0.7, // Higher = less sensitive to energy
+            zcrThresholdFactor: 1.4, // Higher = less sensitive to ZCR
+            centroidThresholdFactor: 1.15, // Higher = less sensitive to centroid
 
             // Noise floor settings
-            noiseFloorPercentile: 10,    // Percentile to use for noise floor (10th percentile)
-            noiseFloorOffset: 10,        // dB above noise floor to consider as minimum
+            noiseFloorPercentile: 15, // Percentile to use for noise floor (10th percentile)
+            noiseFloorOffset: 8, // dB above noise floor to consider as minimum
 
             // Minimum values to consider as speech
-            minCentroid: 1000,              // Minimum spectral centroid
+            minCentroid: 1000, // Minimum spectral centroid
 
             // Smoothing
-            smoothingTimeConstant: 0.7,      // 0-1, higher = more smoothing
+            smoothingTimeConstant: 0.8, // 0-1, higher = more smoothing  
 
             // Voice detection stability settings
-            holdTimeMs: 500,         // How long to hold "active" state after voice detected
-            minVoiceMs: 150,           // Minimum time voice must be detected to trigger
-            hysteresisFactor: 0.3,    // Additional threshold reduction once voice is active
+            holdTimeMs: 800, // How long to hold "active" state after voice detected
+            minVoiceMs: 200, // Minimum time voice must be detected to trigger
+            hysteresisFactor: 0.35, // Additional threshold reduction once voice is active
+
+            // specific multipliers
+            unvoicedZcrMultiplier: 1.4,
+            unvoicedCentroidMultiplier: 1.25,
+            voicedZcrMultiplier: 0.65
         };
 
         // Buffer for adaptive thresholding
@@ -206,7 +226,16 @@
                         const centroidMean = centroidHistory.reduce((a, b) => a + b) / CONFIG.frameMemory;
 
                         // Calculate adaptive noise floor
-                        const noiseFloor = calculateNoiseFloor(energyHistory);
+                        const noiseFloor = calculateNoiseFloor(energyHistory).toFixed(3);
+                        const zcrThreshold = (zcrMean * CONFIG.zcrThresholdFactor).toFixed(3);
+                        const centroidThreshold = Math.max(
+                            centroidMean * CONFIG.centroidThresholdFactor,
+                            CONFIG.minCentroid
+                        ).toFixed(3);
+
+                        document.getElementById('noiseFloorThresholdValue').textContent = noiseFloor;
+                        document.getElementById('zcrThresholdValue').textContent = zcrThreshold;
+                        document.getElementById('centroidThresholdValue').textContent = centroidThreshold;
 
                         return {
                             energyThreshold: Math.max(
@@ -218,7 +247,7 @@
                                 centroidMean * CONFIG.centroidThresholdFactor,
                                 CONFIG.minCentroid
                             ),
-                            noiseFloor: noiseFloor  // Include noise floor in return values
+                            noiseFloor  // Include noise floor in return values
                         };
                     }
 
@@ -260,10 +289,14 @@
                             thresholds.energyThreshold;
 
                         // Basic voice detection
-                        const instantVoiceActive =
-                            decibels > activeEnergyThreshold &&
-                            (zcr < thresholds.zcrThreshold || centroid > thresholds.centroidThreshold) &&
-                            decibels > thresholds.noiseFloor;  // Use noise floor instead of CONFIG.minEnergy
+                        const instantVoiceActive = (
+                            // Voiced speech (vowels)
+                            (zcr < thresholds.zcrThreshold * CONFIG.voicedZcrMultiplier &&
+                                centroid > thresholds.centroidThreshold) ||
+                            // Unvoiced speech (consonants)
+                            (zcr > thresholds.zcrThreshold * CONFIG.unvoicedZcrMultiplier &&
+                                centroid > thresholds.centroidThreshold * CONFIG.unvoicedCentroidMultiplier)
+                        ) && decibels > thresholds.noiseFloor;
 
                         // Update consecutive voice time
                         if (instantVoiceActive) {
@@ -323,9 +356,28 @@
 
                         // Update feature displays
                         document.getElementById('energyValue').textContent =
-                            `${displayValue} dB (NF: ${Math.round(thresholds.noiseFloor)})`; // Show noise floor
+                            `${displayValue} dB`; // Show noise floor
                         document.getElementById('zcrValue').textContent = zcr.toFixed(3);
                         document.getElementById('centroidValue').textContent = Math.round(centroid);
+
+                        // if a feature above threshold, change the color of the feature to green
+                        if (decibels > thresholds.energyThreshold) {
+                            document.getElementById('energyValue').style.backgroundColor = 'green';
+                        } else {
+                            document.getElementById('energyValue').style.backgroundColor = 'white';
+                        }
+
+                        if (zcr < thresholds.zcrThreshold) {
+                            document.getElementById('zcrValue').style.backgroundColor = 'green';
+                        } else {
+                            document.getElementById('zcrValue').style.backgroundColor = 'white';
+                        }
+
+                        if (centroid > thresholds.centroidThreshold) {
+                            document.getElementById('centroidValue').style.backgroundColor = 'green';
+                        } else {
+                            document.getElementById('centroidValue').style.backgroundColor = 'white';
+                        }
 
                         animationId = requestAnimationFrame(updateDecibels);
                     }
