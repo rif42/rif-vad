@@ -102,6 +102,13 @@
         </div>
     </div>
 
+    <div id="features">
+        <div class="feature">
+            <div>System Status</div>
+            <div id="calibrationStatus" class="feature-value">Calibrating</div>
+        </div>
+    </div>
+
     <script>
         let mediaRecorder;
         let stream;
@@ -139,13 +146,18 @@
             // specific multipliers
             unvoicedZcrMultiplier: 1.4,
             unvoicedCentroidMultiplier: 1.25,
-            voicedZcrMultiplier: 0.65
+            voicedZcrMultiplier: 0.65,
+
+            initialCalibrationTime: 3000, // 3 seconds of silent calibration
+            initialNoiseFloor: -60,      // Conservative starting point
+            initialZCR: 0.2,             // Typical noise ZCR
+            initialCentroid: 800         // Typical noise centroid
         };
 
         // Buffer for adaptive thresholding
-        let energyHistory = new Array(CONFIG.frameMemory).fill(-100);
-        let zcrHistory = new Array(CONFIG.frameMemory).fill(0);
-        let centroidHistory = new Array(CONFIG.frameMemory).fill(0);
+        let energyHistory = new Array(CONFIG.frameMemory).fill(CONFIG.initialNoiseFloor);
+        let zcrHistory = new Array(CONFIG.frameMemory).fill(CONFIG.initialZCR);
+        let centroidHistory = new Array(CONFIG.frameMemory).fill(CONFIG.initialCentroid);
 
         // Add state tracking variables
         let lastVoiceDetectedTime = 0;
@@ -153,6 +165,10 @@
         let isVoiceHeld = false;
         let consecutiveVoiceTime = 0;
         let lastFrameTime = 0;
+
+        // Add calibration state tracking
+        let calibrationStartTime = 0;
+        let isCalibrating = false;
 
         const toggleBtn = document.getElementById('toggleBtn');
         let audioContext = null;
@@ -252,6 +268,11 @@
                     }
 
                     function updateDecibels() {
+                        if (!isCalibrating) {
+                            calibrationStartTime = Date.now();
+                            isCalibrating = true;
+                        }
+
                         const currentTime = Date.now();
                         const deltaTime = lastFrameTime ? currentTime - lastFrameTime : 0;
                         lastFrameTime = currentTime;
@@ -288,12 +309,11 @@
                             thresholds.energyThreshold - (CONFIG.hysteresisFactor * Math.abs(thresholds.energyThreshold)) :
                             thresholds.energyThreshold;
 
-                        // Basic voice detection
+                        // Modify voice detection logic
                         const instantVoiceActive = (
-                            // Voiced speech (vowels)
+                            (Date.now() - calibrationStartTime > CONFIG.initialCalibrationTime) && // Block during calibration
                             (zcr < thresholds.zcrThreshold * CONFIG.voicedZcrMultiplier &&
                                 centroid > thresholds.centroidThreshold) ||
-                            // Unvoiced speech (consonants)
                             (zcr > thresholds.zcrThreshold * CONFIG.unvoicedZcrMultiplier &&
                                 centroid > thresholds.centroidThreshold * CONFIG.unvoicedCentroidMultiplier)
                         ) && decibels > thresholds.noiseFloor;
@@ -378,6 +398,10 @@
                         } else {
                             document.getElementById('centroidValue').style.backgroundColor = 'white';
                         }
+
+                        // Add visual feedback
+                        document.getElementById('calibrationStatus').textContent =
+                            isCalibrating ? `Calibrating (${CONFIG.initialCalibrationTime / 1000}s)` : "Ready";
 
                         animationId = requestAnimationFrame(updateDecibels);
                     }
